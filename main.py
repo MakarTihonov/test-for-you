@@ -253,8 +253,8 @@ async def callback_menu_locations(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("filter_"))
 async def callback_filter_select(callback: types.CallbackQuery):
     data_parts = callback.data.split("_")
-    region_name = data_parts[1] 
-    filter_value = "_".join(data_parts[2:]) 
+    region_name = data_parts[1]
+    filter_value = "_".join(data_parts[2:])
     all_locations = LOCATIONS_DB.get(region_name, [])
     filtered_locs = []
     for loc in all_locations:
@@ -262,7 +262,9 @@ async def callback_filter_select(callback: types.CallbackQuery):
             filtered_locs.append(loc)
         elif filter_value in ["nature", "history", "photo", "modern", "ethno", "future"] and loc["category"] == filter_value:
             filtered_locs.append(loc)
-        elif filter_value in ["summer", "winter", "autumn_spring"] and (loc["season"] == filter_value or loc["season"] == "all"):
+        elif filter_value == "autumn_spring" and loc["season"] in ["autumn", "spring", "all"]:
+            filtered_locs.append(loc)
+        elif filter_value in ["summer", "winter"] and loc["season"] in [filter_value, "all"]:
             filtered_locs.append(loc)
     if not filtered_locs:
         await callback.answer("😔 Подходящих мест по вашему фильтру пока не найдено!", show_alert=True)
@@ -274,36 +276,22 @@ async def callback_filter_select(callback: types.CallbackQuery):
     await send_location_card(callback.message.chat.id, region_name, 0, filter_value)
     await callback.answer()
 async def send_location_card(chat_id: int, region_name: str, index: int, filter_value: str):
-    """Генерация и безопасная отправка карточки места с динамическим Избранным"""
     all_locations = LOCATIONS_DB.get(region_name, [])
     filtered_locs = []
-    if filter_value == "my_trips":
-        async with aiosqlite.connect(DB_NAME) as db:
-            async with db.execute("SELECT location_id FROM favorites WHERE user_id = ?", (chat_id,)) as cursor:
-                fav_rows = await cursor.fetchall()
-        fav_ids = [row[0] for row in fav_rows]
-        for r_name in LOCATIONS_DB:
-            for loc in LOCATIONS_DB[r_name]:
-                if loc["id"] in fav_ids:
-                    filtered_locs.append(loc)
-    else:
-        for loc in all_locations:
-            if filter_value == "all":
-                filtered_locs.append(loc)
-            elif filter_value in ["nature", "history", "photo", "modern", "ethno", "future"] and loc["category"] == filter_value:
-                filtered_locs.append(loc)
-            elif filter_value in ["summer", "winter", "autumn_spring"] and (loc["season"] == filter_value or loc["season"] == "all"):
-                filtered_locs.append(loc)
-    if not filtered_locs:
-        builder = InlineKeyboardBuilder()
-        builder.row(types.InlineKeyboardButton(text="🔙 В меню", callback_data="back_to_regions"))
-        await bot.send_message(chat_id, "📁 Ваше Избранное пока пусто! Добавляйте места кнопкой '⭐ В Избранное' во время просмотра.", reply_markup=builder.as_markup())
-        return
+    for loc in all_locations:
+        if filter_value == "all":
+            filtered_locs.append(loc)
+        elif filter_value in ["nature", "history", "photo", "modern", "ethno", "future"] and loc["category"] == filter_value:
+            filtered_locs.append(loc)
+        elif filter_value == "autumn_spring" and loc["season"] in ["autumn", "spring", "all"]:
+            filtered_locs.append(loc)
+        elif filter_value in ["summer", "winter"] and loc["season"] in [filter_value, "all"]:
+            filtered_locs.append(loc)      
     loc = filtered_locs[index]
     total_count = len(filtered_locs)
     caption = f"📍 <b>{loc['title']}</b>\n\n{loc['description']}\n\n"
     if loc.get('promo_text'):
-        caption += f"{loc['promo_text']}\n\n"
+        caption += f"{loc['promo_text']}\n\n" 
     builder = InlineKeyboardBuilder()
     prev_idx = total_count - 1 if index == 0 else index - 1
     next_idx = 0 if index == total_count - 1 else index + 1
@@ -312,13 +300,9 @@ async def send_location_card(chat_id: int, region_name: str, index: int, filter_
         types.InlineKeyboardButton(text=f"📄 {index + 1} / {total_count}", callback_data="dont_click"),
         types.InlineKeyboardButton(text="Вперед ➡️", callback_data=f"page_{region_name}_{next_idx}_{filter_value}")
     )
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT 1 FROM favorites WHERE user_id = ? AND location_id = ?", (chat_id, loc['id'])) as cursor:
-            is_fav = await cursor.fetchone()
-    if is_fav:
-        builder.row(types.InlineKeyboardButton(text="❌ Удалить из Избранного", callback_data=f"unfav_{region_name}_{loc['id']}_{index}_{filter_value}"))
-    else:
-        builder.row(types.InlineKeyboardButton(text="⭐️ В Избранное", callback_data=f"fav_{region_name}_{loc['id']}_{index}_{filter_value}"))
+    builder.row(
+        types.InlineKeyboardButton(text="⭐️ В Избранное", callback_data=f"fav_{region_name}_{loc['id']}_{index}_{filter_value}")
+    )
     builder.row(types.InlineKeyboardButton(text="🏠 В меню региона", callback_data=f"region_{region_name}"))
     try:
         await bot.send_photo(chat_id=chat_id, photo=loc['photo'], caption=caption, reply_markup=builder.as_markup(), parse_mode="HTML")
@@ -646,12 +630,27 @@ async def callback_broadcast_cancel(callback: types.CallbackQuery, state: FSMCon
 @dp.message(AdminBroadcasting.waiting_for_2fa, IsAdminFilter(admin_id=ADMIN_ID))
 async def process_admin_2fa_verification(message: types.Message, state: FSMContext):
     user_code = message.text.strip().replace(" ", "")
+    state_data = await state.get_data()
+    failed_attempts = state_data.get("failed_attempts", 0)
     if not totp.verify(user_code):
-        await message.answer("❌ *Неверный код безопасности или срок его действия истек!* Попробуйте еще раз:")
+        failed_attempts += 1
+        if failed_attempts >= 3:
+            await state.clear() 
+            await message.answer(
+                "🚨 3 неверных ввода кода подряд!\n"
+                "Сессия создания рассылки аннулирована.",
+                parse_mode="Markdown"
+            )
+            return
+        await state.update_data(failed_attempts=failed_attempts)
+        await message.answer(
+            f"❌ *Неверный код безопасности!* Попробуйте еще раз.\n"
+            f"⚠️ У вас осталось попыток: *{3 - failed_attempts}*",
+            parse_mode="Markdown"
+        )
         return
-    data = await state.get_data()
-    photo_id = data.get("photo_id")
-    text_content = data.get("text_content")
+    photo_id = state_data.get("photo_id")
+    text_content = state_data.get("text_content")
     await state.clear()
     await message.answer("🚀 *Код подтвержден! Начинаю массовую рассылку рекламы...*")
     async with aiosqlite.connect(DB_NAME) as db:
@@ -673,7 +672,7 @@ async def process_admin_2fa_verification(message: types.Message, state: FSMConte
     await message.answer(
         "📊 *Рассылка успешно завершена!*\n\n"
         f"✅ Доставлено сообщений: *{success_count}*\n"
-        f"❌ Не доставлено (бот в бане у юзера): *{failed_count}*",
+        f"❌ Не доставлено (бот в бане): *{failed_count}*",
         reply_markup=get_admin_main_keyboard(),
         parse_mode="Markdown"
     )
