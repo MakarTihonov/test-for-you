@@ -1,18 +1,17 @@
 import asyncio
-from typing import Any, Awaitable, Callable, Dict
+from typing import Any, Awaitable, Callable, Dict, Set
 from aiogram import BaseMiddleware, types
 from aiogram.filters import BaseFilter
-from aiogram.fsm.context import FSMContext
 
 class IsAdminFilter(BaseFilter):
-    def __init__(self, admin_id: int):
-        self.admin_id = admin_id
+    def __init__(self, admin_ids: Set[int]):
+        self.admin_ids = admin_ids
     async def __call__(self, message_or_callback: types.Message | types.CallbackQuery) -> bool:
-        return message_or_callback.from_user.id == self.admin_id
+        return message_or_callback.from_user.id in self.admin_ids
 class ThrottlingMiddleware(BaseMiddleware):
     def __init__(self, limit: float = 1.0):
         self.limit = limit
-        self.storage = {} 
+        self.storage: Dict[int, float] = {} 
     async def __call__(
         self,
         handler: Callable[[types.TelegramObject, Dict[str, Any]], Awaitable[Any]],
@@ -25,9 +24,12 @@ class ThrottlingMiddleware(BaseMiddleware):
             last_time = self.storage[user_id]
             if current_time - last_time < self.limit:
                 if isinstance(event, types.CallbackQuery):
-                    await event.answer("⚠️ Пожалуйста, не нажимайте на кнопки так часто!", show_alert=True)
-                return
+                    await event.answer("⚠️ Не нажимайте на кнопки так часто!", show_alert=True)
+                elif isinstance(event, types.Message):
+                    if current_time - last_time > 0.5:
+                        await event.reply("⚠️ Пожалуйста, не спамьте!")
+                return 
         self.storage[user_id] = current_time
-        if len(self.storage) > 10000:
-            self.storage = {k: v for k, v in self.storage.items() if current_time - v < 10}
+        if len(self.storage) > 5000:
+            self.storage = {k: v for k, v in self.storage.items() if current_time - v < self.limit}
         return await handler(event, data)
